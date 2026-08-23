@@ -1,4 +1,4 @@
-﻿#requires -version 5.1
+#requires -version 5.1
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName PresentationFramework
@@ -501,11 +501,12 @@ function Show-Analysis {
     $AttachmentEmpty.Visibility = if ($Analysis.Attachments.Count) { 'Collapsed' } else { 'Visible' }
 }
 $copyHandler = [System.Windows.RoutedEventHandler]{
-    param($sender, $eventArgs)
-    $button = $eventArgs.Source
+    param($eventSource, $routedEventArgs)
+    [void]$eventSource
+    $button = $routedEventArgs.Source
     if (($button -is [System.Windows.Controls.Button]) -and ($button.ToolTip -eq 'Copy value')) {
         Copy-Value -Value ([string]$button.Tag)
-        $eventArgs.Handled = $true
+        $routedEventArgs.Handled = $true
     }
 }
 $window.AddHandler([System.Windows.Controls.Button]::ClickEvent, $copyHandler)
