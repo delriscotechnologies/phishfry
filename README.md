@@ -12,7 +12,7 @@ PhishFry is a focused Windows PowerShell 5.1 utility for inspecting evidence con
 
 The analysis stays on the local computer. The script does not contact external services, open URLs, or execute attachments.
 
-> Use PhishFry only with email files you are authorized to inspect. Treat the results as potentially sensitive evidence.
+PhishFry can analyze any `.eml` file stored locally. Nothing is uploaded.
 
 ## Install
 
