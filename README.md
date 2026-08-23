@@ -53,9 +53,11 @@ Copy buttons copy individual evidence values to the Windows clipboard.
 
 ## Scope and limits
 
-- URLs and attachments are displayed as evidence but are never opened or executed.
-- SPF, DKIM, and DMARC values are reported from existing email headers. PhishFry does not independently perform DNS lookups or cryptographic verification.
-- A SHA-256 hash identifies attachment content; it does not determine whether the attachment is safe.
+- PhishFry is intended for safe, local triage of `.eml` files without interacting with potentially malicious content.
+- URLs, IP addresses, sender information, and attachment hashes are extracted as evidence for further investigation with services such as VirusTotal or IPQualityScore.
+- URLs are never opened, and attachments are never executed by PhishFry.
+- SPF, DKIM, and DMARC values are reported from existing email headers and are not independently verified.
+- SHA-256 hashes can be used to investigate attachments without opening them, but a hash alone does not determine whether a file is safe.
 
 See [SECURITY.md](SECURITY.md) for security and vulnerability-reporting guidance.
 
