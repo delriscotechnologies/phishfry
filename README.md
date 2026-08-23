@@ -24,7 +24,7 @@ cd phishfry
 powershell.exe -File .\PhishFry.ps1
 ```
 
-Choose an `.eml` file, select **Analyze**, and review the results. Files larger than 50 MB are rejected.
+Choose an .eml file, select **Analyze**, and review the results. Files larger than 50 MB are rejected.
 
 If your organization restricts PowerShell execution, follow its approved execution-policy and code-signing requirements.
 
