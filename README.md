@@ -1,14 +1,22 @@
-# PhishFry
+<p align="center">
+  <img src="assets/phishfry-logo.png" alt="PhishFry" width="420">
+</p>
 
-A local PowerShell utility for inspecting evidence contained in `.eml` email files.
-
-![PhishFry interface](assets/phishfry-gui.png)
+<p align="center">
+  Local EML evidence analysis for email security and forensic review.
+</p>
 
 ---
 
-PhishFry is one Windows PowerShell 5.1 script with a WPF interface. It reads a selected email file and presents useful message, sender, authentication, URL, and attachment evidence in one place for review or copying.
+PhishFry is a focused Windows PowerShell 5.1 utility for inspecting evidence contained in `.eml` files. It presents message headers, reported authentication results, sender evidence, URLs, and attachment hashes in a simple WPF interface.
 
 The analysis stays on the local computer. The script does not contact external services, open URLs, or execute attachments.
+
+> Use PhishFry only with email files you are authorized to inspect. Treat the results as potentially sensitive evidence.
+
+## Interface
+
+![PhishFry interface](assets/phishfry-gui.png)
 
 ## Quick Start
 
