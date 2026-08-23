@@ -340,7 +340,7 @@ function Invoke-PhishFryAnalysis {
 $xaml = @'
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml" xmlns:shell="clr-namespace:System.Windows.Shell;assembly=PresentationFramework" Title="PhishFry - EML Analyzer" Width="1280" Height="912" MinWidth="1000" MinHeight="680" WindowStartupLocation="CenterScreen" WindowStyle="None" ResizeMode="CanResize" Background="#F3F6F4" FontFamily="Segoe UI" Foreground="#172729">
 <shell:WindowChrome.WindowChrome>
-<shell:WindowChrome CaptionHeight="58" ResizeBorderThickness="6" CornerRadius="0" GlassFrameThickness="0" />
+<shell:WindowChrome CaptionHeight="46" ResizeBorderThickness="6" CornerRadius="0" GlassFrameThickness="0" />
 </shell:WindowChrome.WindowChrome>
 <Window.Resources>
 <BooleanToVisibilityConverter x:Key="BooleanToVisibility" />
@@ -364,7 +364,7 @@ $xaml = @'
 </DataTemplate>
 </Window.Resources>
 <Grid>
-<Grid.RowDefinitions><RowDefinition Height="58" /><RowDefinition Height="70" /><RowDefinition Height="*" /><RowDefinition Height="30" />
+<Grid.RowDefinitions><RowDefinition Height="46" /><RowDefinition Height="70" /><RowDefinition Height="*" /><RowDefinition Height="30" />
 </Grid.RowDefinitions>
 <Border Grid.Row="0" Background="#062A2D"><Grid><Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="48" /><ColumnDefinition Width="48" /><ColumnDefinition Width="48" /></Grid.ColumnDefinitions><StackPanel Grid.ColumnSpan="4" Orientation="Horizontal" HorizontalAlignment="Center" VerticalAlignment="Center" IsHitTestVisible="False"><TextBlock Text="PHISHFRY" Foreground="#D96D00" FontFamily="Segoe UI Semibold" FontSize="24" VerticalAlignment="Center" /><TextBlock Text="-" Foreground="White" FontFamily="Segoe UI" FontSize="17" Margin="10,0" VerticalAlignment="Center" /><TextBlock Text="EML Evidence Analyzer" Foreground="White" FontFamily="Segoe UI" FontSize="17" Margin="0,2,0,0" VerticalAlignment="Center" /></StackPanel><Button x:Name="MinimizeButton" Grid.Column="1" ToolTip="Minimize" Style="{StaticResource TitleBarButton}" shell:WindowChrome.IsHitTestVisibleInChrome="True"><Viewbox Width="12" Height="12"><Canvas Width="12" Height="12"><Path Data="M1,6 L11,6" Stroke="White" StrokeThickness="1" StrokeStartLineCap="Square" StrokeEndLineCap="Square" /></Canvas></Viewbox></Button><Button x:Name="MaximizeButton" Grid.Column="2" ToolTip="Maximize or restore" Style="{StaticResource TitleBarButton}" shell:WindowChrome.IsHitTestVisibleInChrome="True"><Grid><Viewbox x:Name="MaximizeGlyph" Width="12" Height="12"><Canvas Width="12" Height="12"><Rectangle Canvas.Left="1.5" Canvas.Top="1.5" Width="9" Height="9" Stroke="White" StrokeThickness="1" /></Canvas></Viewbox><Viewbox x:Name="RestoreGlyph" Width="12" Height="12" Visibility="Collapsed"><Canvas Width="12" Height="12"><Path Data="M4,3 L4,1.5 L10.5,1.5 L10.5,8 L9,8" Stroke="White" StrokeThickness="1" /><Rectangle Canvas.Left="1.5" Canvas.Top="3.5" Width="7" Height="7" Stroke="White" StrokeThickness="1" /></Canvas></Viewbox></Grid></Button><Button x:Name="CloseButton" Grid.Column="3" ToolTip="Close" Style="{StaticResource CloseTitleBarButton}" shell:WindowChrome.IsHitTestVisibleInChrome="True"><Viewbox Width="12" Height="12"><Canvas Width="12" Height="12"><Path Data="M2,2 L10,10 M10,2 L2,10" Stroke="White" StrokeThickness="1" StrokeStartLineCap="Square" StrokeEndLineCap="Square" /></Canvas></Viewbox></Button></Grid>
 </Border>
