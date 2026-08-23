@@ -30,9 +30,7 @@ If your organization restricts PowerShell execution, follow its approved executi
 
 ## What it does
 
-PhishFry:
-
-1. Reads the selected `.eml` file into memory and parses its headers and MIME structure.
+1. Reads the selected .eml file into memory and parses its headers and MIME structure.
 2. Decodes supported Base64 and quoted-printable content.
 3. Extracts URLs from text and HTML message parts.
 4. Calculates SHA-256 hashes for attachments without writing them to disk.
