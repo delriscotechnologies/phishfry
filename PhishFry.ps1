@@ -17,15 +17,13 @@ function Read-EmlEntity {
     $headerText = if ($separator.Success) { $Text.Substring(0, $separator.Index) } else { $Text }
     $bodyText = if ($separator.Success) { $Text.Substring($separator.Index + $separator.Length) } else { '' }
     $headers = New-Object System.Collections.ArrayList
-    $malformedCount = 0
     $unfolded = [regex]::Replace($headerText, "(?:\r\n?|\n)[ \t]+", ' ')
     foreach ($line in [regex]::Split($unfolded, "\r\n?|\n")) {
         if ($line -match '^([!-9;-~]+):\s*(.*)$') {
             [void]$headers.Add([pscustomobject]@{ Name = $Matches[1]; Value = $Matches[2] })
         }
-        elseif (-not [string]::IsNullOrWhiteSpace($line)) { $malformedCount++ }
     }
-    [pscustomobject]@{ Headers = @($headers); BodyText = $bodyText; MalformedCount = $malformedCount }
+    [pscustomobject]@{ Headers = @($headers); BodyText = $bodyText }
 }
 function Get-EmlHeader {
     param([object[]]$Headers, [string]$Name, [switch]$All)
@@ -95,24 +93,22 @@ function Split-MultipartBody {
 }
 function Read-MimeEntity {
     param([object]$Entity, [System.Collections.ArrayList]$TextParts,
-        [System.Collections.ArrayList]$Attachments, [System.Collections.ArrayList]$Warnings, [int]$Depth = 0)
-    if ($Depth -gt 30) { [void]$Warnings.Add('A MIME nesting limit was reached.'); return }
+        [System.Collections.ArrayList]$Attachments, [int]$Depth = 0)
+    if ($Depth -gt 30) { return }
     $headers = @($entity.Headers)
-    if ($entity.MalformedCount) { [void]$Warnings.Add('A MIME section contains malformed headers.') }
     $contentTypeValue = Get-EmlHeader -Headers $headers -Name 'Content-Type'
     try { $contentType = [System.Net.Mime.ContentType]::new($(if ($contentTypeValue) { $contentTypeValue } else { 'text/plain; charset=us-ascii' })) }
     catch {
         $contentType = [System.Net.Mime.ContentType]::new('text/plain; charset=us-ascii')
-        [void]$Warnings.Add('A MIME content type is malformed.')
     }
     $mediaType = $contentType.MediaType.ToLowerInvariant()
     if ($mediaType.StartsWith('multipart/')) {
-        if ([string]::IsNullOrWhiteSpace($contentType.Boundary)) { [void]$Warnings.Add('A multipart section has no usable boundary.'); return }
+        if ([string]::IsNullOrWhiteSpace($contentType.Boundary)) { return }
         $childParts = @(Split-MultipartBody -BodyText $entity.BodyText -Boundary $contentType.Boundary)
-        if (-not $childParts.Count) { [void]$Warnings.Add('A multipart section could not be separated.'); return }
+        if (-not $childParts.Count) { return }
         foreach ($childPart in $childParts) {
-            try { Read-MimeEntity -Entity (Read-EmlEntity -Text $childPart) -TextParts $TextParts -Attachments $Attachments -Warnings $Warnings -Depth ($Depth + 1) }
-            catch { [void]$Warnings.Add('A MIME section could not be parsed.') }
+            try { Read-MimeEntity -Entity (Read-EmlEntity -Text $childPart) -TextParts $TextParts -Attachments $Attachments -Depth ($Depth + 1) }
+            catch { continue }
         }
         return
     }
@@ -123,7 +119,9 @@ function Read-MimeEntity {
     if (-not $filename) { $filename = $contentType.Name }
     if (-not $filename) { $filename = $contentType.Parameters['name*'] }
     if ($filename -match "^[^']*'[^']*'(.*)$") { $filename = $Matches[1] }
-    try { $filename = [System.Uri]::UnescapeDataString($filename) } catch {}
+    if ($filename -and $filename -notmatch '%(?![0-9A-Fa-f]{2})') {
+        $filename = [System.Uri]::UnescapeDataString($filename)
+    }
     $isAttachment = ($disposition -and $disposition.DispositionType -ieq 'attachment') -or $filename
     if (-not $isAttachment -and $mediaType -notin @('text/plain', 'text/html')) { return }
     $decodedContent = Convert-TransferContent -BodyText $entity.BodyText -TransferEncoding (Get-EmlHeader -Headers $headers -Name 'Content-Transfer-Encoding')
@@ -132,8 +130,7 @@ function Read-MimeEntity {
         $attachmentSize = $decodedContent.Status
         $attachmentHash = $decodedContent.Status
         $canCopyHash = $false
-        if (-not $decodedContent.Success) { [void]$Warnings.Add('An attachment could not be decoded.') }
-        else {
+        if ($decodedContent.Success) {
             $attachmentSize = '{0:N0} bytes' -f $decodedContent.Bytes.Length
             try {
                 $attachmentHash = Get-Sha256Hex -Bytes ([byte[]]$decodedContent.Bytes)
@@ -141,7 +138,6 @@ function Read-MimeEntity {
             }
             catch {
                 $attachmentHash = 'Hash failed'
-                [void]$Warnings.Add('An attachment hash could not be calculated.')
             }
         }
         [void]$Attachments.Add([pscustomobject]@{
@@ -151,14 +147,14 @@ function Read-MimeEntity {
         return
     }
     if ($mediaType -in @('text/plain', 'text/html')) {
-        if (-not $decodedContent.Success) { [void]$Warnings.Add('A text MIME section could not be decoded.'); return }
+        if (-not $decodedContent.Success) { return }
         $charset = if ($contentType.CharSet) { $contentType.CharSet } else { 'utf-8' }
         try {
             $textEncoding = [System.Text.Encoding]::GetEncoding($charset)
             $decodedText = $textEncoding.GetString([byte[]]$decodedContent.Bytes)
             [void]$TextParts.Add([pscustomobject]@{ MediaType = $mediaType; Text = $decodedText })
         }
-        catch { [void]$Warnings.Add('A text MIME charset is unsupported.') }
+        catch { return }
     }
 }
 function Get-ExtractedUrls {
@@ -288,7 +284,6 @@ function Invoke-PhishFryAnalysis {
     if ($headers.Count -eq 0) {
         throw 'The EML file does not contain usable message headers.'
     }
-    $warnings = New-Object System.Collections.ArrayList
     $firstSeen = Get-FirstReceivedEvidence -Headers $headers
     $fromValue = Get-DisplayHeaderValue -Headers $headers -Name 'From'
     $fromDomain = Get-DomainFromAddressHeader -AddressHeader $fromValue
@@ -303,12 +298,7 @@ function Invoke-PhishFryAnalysis {
     $envelopeDomain = Get-DomainFromAddressHeader -AddressHeader $envelopeSender
     $textParts = New-Object System.Collections.ArrayList
     $attachments = New-Object System.Collections.ArrayList
-    try {
-        Read-MimeEntity -Entity $rootEntity -TextParts $textParts -Attachments $attachments -Warnings $warnings
-    }
-    catch {
-        [void]$warnings.Add('The MIME structure could not be fully parsed.')
-    }
+    Read-MimeEntity -Entity $rootEntity -TextParts $textParts -Attachments $attachments
     $urls = @(Get-ExtractedUrls -TextParts @($textParts))
     return [pscustomobject]@{
         Overview = [ordered]@{
@@ -334,7 +324,6 @@ function Invoke-PhishFryAnalysis {
         }
         Urls        = $urls
         Attachments = @($attachments)
-        Warnings    = @($warnings)
     }
 }
 $xaml = @'
@@ -364,7 +353,7 @@ $xaml = @'
 </DataTemplate>
 </Window.Resources>
 <Grid>
-<Grid.RowDefinitions><RowDefinition Height="46" /><RowDefinition Height="70" /><RowDefinition Height="*" /><RowDefinition Height="30" />
+<Grid.RowDefinitions><RowDefinition Height="46" /><RowDefinition Height="70" /><RowDefinition Height="*" />
 </Grid.RowDefinitions>
 <Border Grid.Row="0" Background="#062A2D"><Grid><Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="48" /><ColumnDefinition Width="48" /><ColumnDefinition Width="48" /></Grid.ColumnDefinitions><StackPanel Grid.ColumnSpan="4" Orientation="Horizontal" HorizontalAlignment="Center" VerticalAlignment="Center" IsHitTestVisible="False"><TextBlock Text="PHISHFRY" Foreground="#D96D00" FontFamily="Segoe UI Semibold" FontSize="24" VerticalAlignment="Center" /><TextBlock Text="-" Foreground="White" FontFamily="Segoe UI" FontSize="17" Margin="10,0" VerticalAlignment="Center" /><TextBlock Text="EML Evidence Analyzer" Foreground="White" FontFamily="Segoe UI" FontSize="17" Margin="0,2,0,0" VerticalAlignment="Center" /></StackPanel><Button x:Name="MinimizeButton" Grid.Column="1" ToolTip="Minimize" Style="{StaticResource TitleBarButton}" shell:WindowChrome.IsHitTestVisibleInChrome="True"><Viewbox Width="12" Height="12"><Canvas Width="12" Height="12"><Path Data="M1,6 L11,6" Stroke="White" StrokeThickness="1" StrokeStartLineCap="Square" StrokeEndLineCap="Square" /></Canvas></Viewbox></Button><Button x:Name="MaximizeButton" Grid.Column="2" ToolTip="Maximize or restore" Style="{StaticResource TitleBarButton}" shell:WindowChrome.IsHitTestVisibleInChrome="True"><Grid><Viewbox x:Name="MaximizeGlyph" Width="12" Height="12"><Canvas Width="12" Height="12"><Rectangle Canvas.Left="1.5" Canvas.Top="1.5" Width="9" Height="9" Stroke="White" StrokeThickness="1" /></Canvas></Viewbox><Viewbox x:Name="RestoreGlyph" Width="12" Height="12" Visibility="Collapsed"><Canvas Width="12" Height="12"><Path Data="M4,3 L4,1.5 L10.5,1.5 L10.5,8 L9,8" Stroke="White" StrokeThickness="1" /><Rectangle Canvas.Left="1.5" Canvas.Top="3.5" Width="7" Height="7" Stroke="White" StrokeThickness="1" /></Canvas></Viewbox></Grid></Button><Button x:Name="CloseButton" Grid.Column="3" ToolTip="Close" Style="{StaticResource CloseTitleBarButton}" shell:WindowChrome.IsHitTestVisibleInChrome="True"><Viewbox Width="12" Height="12"><Canvas Width="12" Height="12"><Path Data="M2,2 L10,10 M10,2 L2,10" Stroke="White" StrokeThickness="1" StrokeStartLineCap="Square" StrokeEndLineCap="Square" /></Canvas></Viewbox></Button></Grid>
 </Border>
@@ -377,10 +366,8 @@ $xaml = @'
 <Border Grid.Column="2" Style="{StaticResource Section}"><Grid><Grid.RowDefinitions><RowDefinition Height="36" /><RowDefinition Height="Auto" /></Grid.RowDefinitions><Border Background="#062A2D" CornerRadius="5,5,0,0"><TextBlock Text="Sender Evidence" Style="{StaticResource SectionTitle}" /></Border><ItemsControl x:Name="MetadataList" Grid.Row="1" ItemTemplate="{StaticResource ValueRowTemplate}" /></Grid></Border></Grid>
 <Border Grid.Row="2" Style="{StaticResource Section}"><Grid><Grid.RowDefinitions><RowDefinition Height="36" /><RowDefinition Height="Auto" /></Grid.RowDefinitions><Border Background="#062A2D" CornerRadius="5,5,0,0"><TextBlock Text="URLs" Style="{StaticResource SectionTitle}" /></Border><Grid Grid.Row="1"><ItemsControl x:Name="UrlList" ItemTemplate="{StaticResource UrlTemplate}" /><TextBlock x:Name="UrlEmpty" Text="Not present" Margin="12" Foreground="#778481" /></Grid></Grid></Border>
 <Border Grid.Row="4" Style="{StaticResource Section}"><Grid><Grid.RowDefinitions><RowDefinition Height="36" /><RowDefinition Height="Auto" /></Grid.RowDefinitions><Border Background="#062A2D" CornerRadius="5,5,0,0"><TextBlock Text="Attachments" Style="{StaticResource SectionTitle}" /></Border><Grid Grid.Row="1"><Grid.RowDefinitions><RowDefinition Height="34" /><RowDefinition Height="Auto" /></Grid.RowDefinitions><Grid Background="#F7F9F8"><Grid.ColumnDefinitions><ColumnDefinition Width="240" /><ColumnDefinition Width="220" /><ColumnDefinition Width="130" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions><TextBlock Text="Filename" Margin="12,0" FontFamily="Segoe UI Semibold" VerticalAlignment="Center" /><TextBlock Grid.Column="1" Text="Content Type" Margin="12,0" FontFamily="Segoe UI Semibold" VerticalAlignment="Center" /><TextBlock Grid.Column="2" Text="Decoded Size" Margin="12,0" FontFamily="Segoe UI Semibold" VerticalAlignment="Center" /><TextBlock Grid.Column="3" Text="SHA-256" Margin="12,0" FontFamily="Segoe UI Semibold" VerticalAlignment="Center" /></Grid>
-<ItemsControl x:Name="AttachmentGrid" Grid.Row="1"><ItemsControl.ItemTemplate><DataTemplate><Border BorderBrush="#E2E8E5" BorderThickness="0,1,0,0" MinHeight="34"><Grid><Grid.ColumnDefinitions><ColumnDefinition Width="240" /><ColumnDefinition Width="220" /><ColumnDefinition Width="130" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions><TextBlock Text="{Binding Filename}" Margin="12,0" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" /><TextBlock Grid.Column="1" Text="{Binding ContentType}" Margin="12,0" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" /><TextBlock Grid.Column="2" Text="{Binding Size}" Margin="12,0" VerticalAlignment="Center" /><Grid Grid.Column="3"><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="40"/></Grid.ColumnDefinitions><TextBlock Text="{Binding Hash}" Margin="12,0" FontFamily="Consolas" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" ToolTip="{Binding Hash}" /><Button Grid.Column="1" Style="{StaticResource CopyButton}" Tag="{Binding Hash}" IsEnabled="{Binding CanCopyHash}" /></Grid></Grid></Border></DataTemplate></ItemsControl.ItemTemplate></ItemsControl><TextBlock x:Name="AttachmentEmpty" Text="Not present" Margin="12" Foreground="#778481" /></Grid></Grid></Border></Grid>
+<ItemsControl x:Name="AttachmentGrid" Grid.Row="1"><ItemsControl.ItemTemplate><DataTemplate><Border BorderBrush="#E2E8E5" BorderThickness="0,1,0,0" MinHeight="34"><Grid><Grid.ColumnDefinitions><ColumnDefinition Width="240" /><ColumnDefinition Width="220" /><ColumnDefinition Width="130" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions><TextBlock Text="{Binding Filename}" Margin="12,0" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" /><TextBlock Grid.Column="1" Text="{Binding ContentType}" Margin="12,0" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" /><TextBlock Grid.Column="2" Text="{Binding Size}" Margin="12,0" VerticalAlignment="Center" /><Grid Grid.Column="3"><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="40"/></Grid.ColumnDefinitions><TextBlock Text="{Binding Hash}" Margin="12,0" FontFamily="Consolas" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" ToolTip="{Binding Hash}" /><Button Grid.Column="1" Style="{StaticResource CopyButton}" Tag="{Binding Hash}" IsEnabled="{Binding CanCopyHash}" /></Grid></Grid></Border></DataTemplate></ItemsControl.ItemTemplate></ItemsControl><TextBlock x:Name="AttachmentEmpty" Grid.Row="1" Text="Not present" Margin="12" Foreground="#778481" /></Grid></Grid></Border></Grid>
 </ScrollViewer>
-<Border Grid.Row="3" Background="#E8EEEB" BorderBrush="#D5DEDA" BorderThickness="0,1,0,0"><TextBlock x:Name="StatusText" Margin="22,0" VerticalAlignment="Center" FontSize="12" Foreground="#778481" />
-</Border>
 </Grid>
 </Window>
 '@
@@ -409,7 +396,6 @@ $AttachmentEmpty = $window.FindName('AttachmentEmpty')
 $SpfStatus = $window.FindName('SpfStatus')
 $DkimStatus = $window.FindName('DkimStatus')
 $DmarcStatus = $window.FindName('DmarcStatus')
-$StatusText = $window.FindName('StatusText')
 $MinimizeButton.Add_Click({ $window.WindowState = [System.Windows.WindowState]::Minimized })
 $MaximizeButton.Add_Click({
     if ($window.WindowState -eq [System.Windows.WindowState]::Maximized) {
@@ -425,12 +411,9 @@ $window.Add_StateChanged({
     $RestoreGlyph.Visibility = if ($isMaximized) { 'Visible' } else { 'Collapsed' }
 })
 $CloseButton.Add_Click({ $window.Close() })
-function Set-Status {
-    param([string]$Text, [string]$Color = '#778481')
-    $StatusText.Text = $Text
-    $StatusText.Foreground = New-Object System.Windows.Media.SolidColorBrush (
-        [System.Windows.Media.ColorConverter]::ConvertFromString($Color)
-    )
+function Show-Error {
+    param([string]$Message)
+    [System.Windows.MessageBox]::Show($window, $Message, 'PhishFry', 'OK', 'Error') | Out-Null
 }
 function Set-AuthStatus {
     param([System.Windows.Controls.TextBlock]$Control, [string]$Value)
@@ -471,10 +454,9 @@ function Copy-Value {
     }
     try {
         [System.Windows.Clipboard]::SetText($Value)
-        Set-Status -Text 'Copied to clipboard.' -Color '#367A5A'
     }
     catch {
-        Set-Status -Text 'The value could not be copied.' -Color '#BE4D4D'
+        Show-Error -Message 'The value could not be copied.'
     }
 }
 function Clear-Results {
@@ -529,26 +511,25 @@ $ChooseButton.Add_Click({
     $dialog.CheckFileExists = $true
     try { $selected = $dialog.ShowDialog($window) }
     catch {
-        Set-Status -Text 'The file picker could not be opened.' -Color '#BE4D4D'
+        Show-Error -Message 'The file picker could not be opened.'
         return
     }
     if ($selected -ne $true) { return }
     $validation = Test-EmlFile -Path $dialog.FileName
     if (-not $validation.Valid) {
-        Set-Status -Text $validation.Message -Color '#BE4D4D'
+        Show-Error -Message $validation.Message
         return
     }
     $script:SelectedEmlPath = $dialog.FileName
     $FilePathBox.Text = $dialog.FileName
     $AnalyzeButton.IsEnabled = $true
     Clear-Results
-    Set-Status -Text 'File selected. Click Analyze.'
 })
 $AnalyzeButton.Add_Click({
     $validation = Test-EmlFile -Path $script:SelectedEmlPath
     if (-not $validation.Valid) {
         $AnalyzeButton.IsEnabled = $false
-        Set-Status -Text $validation.Message -Color '#BE4D4D'
+        Show-Error -Message $validation.Message
         return
     }
     $AnalyzeButton.IsEnabled = $false
@@ -556,20 +537,13 @@ $AnalyzeButton.Add_Click({
     $ClearButton.IsEnabled = $false
     [System.Windows.Input.Mouse]::OverrideCursor = [System.Windows.Input.Cursors]::Wait
     Clear-Results
-    Set-Status -Text 'Analyzing locally…'
     try {
         $analysis = Invoke-PhishFryAnalysis -Path $script:SelectedEmlPath
         Show-Analysis -Analysis $analysis
-        if ($analysis.Warnings.Count) {
-            Set-Status -Text ('Complete with {0} recoverable MIME warning(s).' -f $analysis.Warnings.Count) -Color '#C98236'
-        }
-        else {
-            Set-Status -Text 'Analysis complete.' -Color '#367A5A'
-        }
     }
     catch {
         Clear-Results
-        Set-Status -Text 'The EML file could not be analyzed.' -Color '#BE4D4D'
+        Show-Error -Message 'The EML file could not be analyzed.'
     }
     finally {
         [System.Windows.Input.Mouse]::OverrideCursor = $null
@@ -583,7 +557,6 @@ $ClearButton.Add_Click({
     $FilePathBox.Text = ''
     $AnalyzeButton.IsEnabled = $false
     Clear-Results
-    Set-Status -Text ''
 })
 Clear-Results
 [void]$window.ShowDialog()
