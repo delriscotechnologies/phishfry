@@ -53,12 +53,9 @@ Copy buttons copy individual evidence values to the Windows clipboard.
 
 ## Scope and limits
 
-- Analysis is local and read-only; the selected .eml file is not modified.
 - URLs and attachments are displayed as evidence but are never opened or executed.
 - SPF, DKIM, and DMARC values are reported from existing email headers. PhishFry does not independently perform DNS lookups or cryptographic verification.
-- Header values can be forged. Sender and routing fields are evidence for investigation, not proof of identity.
 - A SHA-256 hash identifies attachment content; it does not determine whether the attachment is safe.
-- PhishFry does not provide a phishing, malware, or reputation verdict.
 
 See [SECURITY.md](SECURITY.md) for security and vulnerability-reporting guidance.
 
