@@ -14,11 +14,7 @@ The analysis stays on the local computer. The script does not contact external s
 
 > Use PhishFry only with email files you are authorized to inspect. Treat the results as potentially sensitive evidence.
 
-## Interface
-
-![PhishFry interface](assets/phishfry-gui.png)
-
-## Quick Start
+## Install
 
 You need Windows PowerShell 5.1 on Windows. No additional modules are required.
 
@@ -32,7 +28,16 @@ Choose an `.eml` file, select **Analyze**, and review the results. Files larger 
 
 If your organization restricts PowerShell execution, follow its approved execution-policy and code-signing requirements.
 
-## What You Get
+## What it does
+
+PhishFry:
+
+1. Reads the selected `.eml` file into memory and parses its headers and MIME structure.
+2. Decodes supported Base64 and quoted-printable content.
+3. Extracts URLs from text and HTML message parts.
+4. Calculates SHA-256 hashes for attachments without writing them to disk.
+
+## Output
 
 | Section | Evidence shown |
 |---|---|
@@ -44,11 +49,11 @@ If your organization restricts PowerShell execution, follow its approved executi
 
 Copy buttons copy individual evidence values to the Windows clipboard.
 
-## How Analysis Works
+## Demo
 
-PhishFry reads the selected `.eml` file into memory, parses its headers and MIME structure, decodes supported Base64 and quoted-printable content, extracts URLs, and calculates attachment hashes. Attachments are not written to disk.
+![PhishFry interface](assets/phishfry-gui.png)
 
-## Safety and Limitations
+## Scope and limits
 
 - Analysis is local and read-only; the selected `.eml` file is not modified.
 - URLs and attachments are displayed as evidence but are never opened or executed.
