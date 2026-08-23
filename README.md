@@ -53,7 +53,7 @@ Copy buttons copy individual evidence values to the Windows clipboard.
 
 ## Scope and limits
 
-- PhishFry is intended for safe, local triage of `.eml` files without interacting with potentially malicious content.
+- PhishFry is intended for safe, local triage of .eml files without interacting with potentially malicious content.
 - URLs, IP addresses, sender information, and attachment hashes are extracted as evidence for further investigation with services such as VirusTotal or IPQualityScore.
 - URLs are never opened, and attachments are never executed by PhishFry.
 - SPF, DKIM, and DMARC values are reported from existing email headers and are not independently verified.
