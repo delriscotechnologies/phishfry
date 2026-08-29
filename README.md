@@ -8,15 +8,15 @@
 
 ---
 
-PhishFry is a PowerShell utility for inspecting evidence contained in .eml files. It presents message headers, reported authentication results, sender evidence, URLs, and attachment hashes in a simple WPF interface.
+PhishFry is a PowerShell utility for inspecting evidence contained in EML files. It presents message headers, reported authentication results, sender evidence, URLs, and attachment hashes in a simple WPF interface.
 
 The analysis stays on the local computer. The script does not contact external services, open URLs, or execute attachments.
 
-> PhishFry can analyze any .eml file stored locally. Nothing is uploaded.
+> PhishFry analyzes supported EML and MIME structures stored locally. Nothing is uploaded.
 
 ## Install
 
-You need Windows PowerShell 5.1 on Windows. No additional modules are required.
+You need Windows and PowerShell. No additional modules are required.
 
 ```powershell
 git clone https://github.com/delriscotechnologies/phishfry.git
@@ -26,7 +26,7 @@ powershell.exe -File .\PhishFry.ps1
 
 Choose an .eml file, select **Analyze**, and review the results. Files larger than 50 MB are rejected.
 
-If your organization restricts PowerShell execution, follow its approved execution-policy and code-signing requirements.
+If your organization restricts PowerShell execution, follow its approved execution policy and code-signing requirements.
 
 ## What it does
 
@@ -38,7 +38,7 @@ If your organization restricts PowerShell execution, follow its approved executi
 ## Output
 
 | Section | Evidence shown |
-|---|---|
+| --- | --- |
 | Overview | Subject, date, From, To, and Cc |
 | Reported Authentication | SPF, DKIM, and DMARC results reported in the message headers |
 | Sender Evidence | From and Sender domains, Return-Path, Reply-To, and the oldest `Received` host and IP |
@@ -54,10 +54,11 @@ Copy buttons copy individual evidence values to the Windows clipboard.
 ## Scope and limits
 
 - PhishFry is intended for safe, local triage of .eml files without interacting with potentially malicious content.
-- URLs, IP addresses, sender information, and attachment hashes are extracted as evidence for further investigation with services such as VirusTotal or IPQualityScore.
+- URLs, IP addresses, sender information, and attachment hashes are extracted as evidence for approved investigation workflows.
 - URLs are never opened, and attachments are never executed by PhishFry.
 - SPF, DKIM, and DMARC values are reported from existing email headers and are not independently verified.
 - SHA-256 hashes can be used to investigate attachments without opening them, but a hash alone does not determine whether a file is safe.
+- Malformed or unsupported MIME content may be reported as unavailable rather than decoded.
 
 See [SECURITY.md](SECURITY.md) for security and vulnerability-reporting guidance.
 
