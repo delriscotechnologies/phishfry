@@ -27,10 +27,13 @@ function Read-EmlEntity {
 }
 function Get-EmlHeader {
     param([object[]]$Headers, [string]$Name, [switch]$All)
-    $values = @($Headers | Where-Object { [string]::Equals($_.Name, $Name, [System.StringComparison]::OrdinalIgnoreCase) } | ForEach-Object { $_.Value })
-    if ($All) { return $values }
-    if ($values.Count) { return [string]$values[0] }
+    foreach ($header in $Headers) {
+        if (-not [string]::Equals($header.Name, $Name, [StringComparison]::OrdinalIgnoreCase)) { continue }
+        if ($All) { $header.Value }
+        else { return [string]$header.Value }
+    }
 }
+
 function ConvertFrom-QuotedPrintableBytes {
     param([string]$Text)
     $textWithoutSoftBreaks = $Text -replace "=\r\n|=\n|=\r", ''
@@ -78,42 +81,42 @@ function Convert-TransferContent {
 }
 function Split-MultipartBody {
     param([string]$BodyText, [string]$Boundary)
-    $parts = New-Object System.Collections.ArrayList
-    if (-not $Boundary) { return @($parts) }
-    $pattern = '(?m)^--' + [regex]::Escape($Boundary) + '(?<close>--)?[ \t]*\r?$'
-    $markers = [regex]::Matches($BodyText, $pattern)
+    $pattern = '(?m)^--' + [regex]::Escape($Boundary) + '(?<close>--)?[ \t]*(?:\r?\n|$)'
+    $markers = [regex]::Matches($BodyText, $pattern, 'None', [TimeSpan]::FromSeconds(2))
+    if ($markers.Count -lt 2 -or $markers.Count -gt 10001) { throw 'Incomplete or excessive MIME parts.' }
     for ($index = 0; $index -lt $markers.Count; $index++) {
-        if ($markers[$index].Groups['close'].Success) { break }
+        if ($markers[$index].Groups['close'].Success) { return }
+        if ($index + 1 -eq $markers.Count) { throw 'Missing closing MIME boundary.' }
         $start = $markers[$index].Index + $markers[$index].Length
-        $end = if ($index + 1 -lt $markers.Count) { $markers[$index + 1].Index } else { $BodyText.Length }
-        $part = $BodyText.Substring($start, $end - $start).Trim([char[]]"`r`n")
-        if ($part) { [void]$parts.Add($part) }
+        $part = $BodyText.Substring($start, $markers[$index + 1].Index - $start)
+        [regex]::Replace($part, '\r?\n\z', '')
     }
-    return @($parts)
 }
+
 function Read-MimeEntity {
     param([object]$Entity, [System.Collections.ArrayList]$TextParts,
-        [System.Collections.ArrayList]$Attachments, [int]$Depth = 0)
-    if ($Depth -gt 30) { return }
+        [System.Collections.ArrayList]$Attachments, [int]$Depth = 0, [ref]$Remaining = ([ref]10000))
+    $Remaining.Value -= 1
+    if ($Depth -gt 30 -or $Remaining.Value -lt 0) { throw 'MIME depth or part count exceeds the analysis limit.' }
     $headers = @($entity.Headers)
     $contentTypeValue = Get-EmlHeader -Headers $headers -Name 'Content-Type'
     try { $contentType = [System.Net.Mime.ContentType]::new($(if ($contentTypeValue) { $contentTypeValue } else { 'text/plain; charset=us-ascii' })) }
     catch {
-        $contentType = [System.Net.Mime.ContentType]::new('text/plain; charset=us-ascii')
+        throw 'Invalid MIME content type.'
     }
     $mediaType = $contentType.MediaType.ToLowerInvariant()
     if ($mediaType.StartsWith('multipart/')) {
-        if ([string]::IsNullOrWhiteSpace($contentType.Boundary)) { return }
+        if ([string]::IsNullOrWhiteSpace($contentType.Boundary)) { throw 'Missing MIME boundary.' }
         $childParts = @(Split-MultipartBody -BodyText $entity.BodyText -Boundary $contentType.Boundary)
         if (-not $childParts.Count) { return }
         foreach ($childPart in $childParts) {
-            try { Read-MimeEntity -Entity (Read-EmlEntity -Text $childPart) -TextParts $TextParts -Attachments $Attachments -Depth ($Depth + 1) }
-            catch { continue }
+            Read-MimeEntity -Entity (Read-EmlEntity -Text $childPart) -TextParts $TextParts -Attachments $Attachments -Depth ($Depth + 1) -Remaining $Remaining
         }
         return
     }
+    if ($mediaType.StartsWith('message/')) { throw 'Embedded message analysis is unsupported.' }
     $dispositionValue = Get-EmlHeader -Headers $headers -Name 'Content-Disposition'
-    $disposition = if ($dispositionValue) { try { [System.Net.Mime.ContentDisposition]::new($dispositionValue) } catch { $null } }
+    $disposition = if ($dispositionValue) { try { [System.Net.Mime.ContentDisposition]::new($dispositionValue) } catch { throw 'Invalid MIME disposition.' } }
     $filename = if ($disposition) { $disposition.FileName } else { $null }
     if (-not $filename -and $disposition) { $filename = $disposition.Parameters['filename*'] }
     if (-not $filename) { $filename = $contentType.Name }
@@ -147,93 +150,100 @@ function Read-MimeEntity {
         return
     }
     if ($mediaType -in @('text/plain', 'text/html')) {
-        if (-not $decodedContent.Success) { return }
+        if (-not $decodedContent.Success) { throw $decodedContent.Status }
         $charset = if ($contentType.CharSet) { $contentType.CharSet } else { 'utf-8' }
         try {
             $textEncoding = [System.Text.Encoding]::GetEncoding($charset)
             $decodedText = $textEncoding.GetString([byte[]]$decodedContent.Bytes)
             [void]$TextParts.Add([pscustomobject]@{ MediaType = $mediaType; Text = $decodedText })
         }
-        catch { return }
+        catch { throw 'Text content could not be decoded.' }
     }
 }
 function Get-ExtractedUrls {
     param([object[]]$TextParts)
-    $urls = New-Object System.Collections.ArrayList
     $seen = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::Ordinal)
     $urlPattern = '(?i)\bhttps?://[^\s<>"'']+'
-    $trailingCharacters = [char[]]@('.', ',', ';', ':', '!', '?', ')', ']', '}')
+    $attributePattern = '(?is)\b(?:href|src|action)\s*=\s*(?:"(?<url>[^"]*)"|''(?<url>[^'']*)''|(?<url>[^\s>]+))'
     foreach ($part in $TextParts) {
-        foreach ($match in [System.Text.RegularExpressions.Regex]::Matches([string]$part.Text, $urlPattern)) {
-            $url = $match.Value.TrimEnd($trailingCharacters)
-            if ((-not [string]::IsNullOrWhiteSpace($url)) -and $seen.Add($url)) {
-                [void]$urls.Add($url)
+        $text = [string]$part.Text
+        if ($part.MediaType -eq 'text/html') {
+            foreach ($attribute in [regex]::Matches($text, $attributePattern, 'None', [TimeSpan]::FromSeconds(2))) {
+                $url = [System.Net.WebUtility]::HtmlDecode($attribute.Groups['url'].Value).Trim()
+                $parsed = $null
+                if ([Uri]::TryCreate($url, 'Absolute', [ref]$parsed) -and $parsed.Scheme -in @('http', 'https') -and $seen.Add($url)) { $url }
             }
+            $text = [regex]::Replace($text, $attributePattern, ' ', 'None', [TimeSpan]::FromSeconds(2))
+            $text = [System.Net.WebUtility]::HtmlDecode($text)
+        }
+        foreach ($match in [regex]::Matches($text, $urlPattern, 'None', [TimeSpan]::FromSeconds(2))) {
+            if ($seen.Add($match.Value)) { $match.Value }
         }
     }
-    return @($urls)
 }
+
 function Get-DomainFromAddressHeader {
-    param([string]$AddressHeader)
-    $match = [System.Text.RegularExpressions.Regex]::Match(
-        [string]$AddressHeader,
-        "(?i)[A-Z0-9.!#$%&'*+/=?^_``{|}~-]+@(?<domain>[A-Z0-9.-]+)"
-    )
-    if ($match.Success) { return $match.Groups['domain'].Value }
-    return 'Not present'
+    param([string[]]$AddressHeader)
+    if (@($AddressHeader).Count -gt 1) { return 'Decode failed' }
+    $address = [string]($AddressHeader | Select-Object -First 1)
+    if ([string]::IsNullOrWhiteSpace($address) -or $address -eq 'Not present' -or $address -eq '<>') { return 'Not present' }
+    try {
+        $mailboxes = [System.Net.Mail.MailAddressCollection]::new()
+        $mailboxes.Add($address)
+        if ($mailboxes.Count -eq 1) { return $mailboxes[0].Host }
+        return 'Decode failed'
+    }
+    catch { return 'Decode failed' }
 }
+
 function Get-NormalizedAuthenticationResult {
-    param(
-        [object[]]$Headers,
-        [string]$Method
-    )
+    param([object[]]$Headers, [ValidateSet('spf', 'dkim', 'dmarc')][string]$Method)
+    $results = New-Object 'System.Collections.Generic.HashSet[string]'
     $knownResults = 'pass|fail|softfail|neutral|none|temperror|permerror'
+    $ignored = '\((?>[^()\\]+|\\.|(?<Depth>\()|(?<-Depth>\)))*(?(Depth)(?!))\)|"(?:\\.|[^"\\])*"'
+    $pattern = '(?i);\s*' + $Method + '(?:/\d+)?\s*=\s*(?<result>[^\s;]*)(?=\s|;|$)'
     foreach ($value in @(Get-EmlHeader -Headers $Headers -Name 'Authentication-Results' -All)) {
-        $pattern = '(?i)(?:^|[;\s])' + [System.Text.RegularExpressions.Regex]::Escape($Method) + '\s*=\s*(?<result>' + $knownResults + ')\b'
-        $match = [System.Text.RegularExpressions.Regex]::Match($value, $pattern)
-        if ($match.Success) {
-            return $match.Groups['result'].Value.ToUpperInvariant()
+        $clean = [regex]::Replace($value, $ignored, ' ', 'None', [TimeSpan]::FromSeconds(2))
+        if ($clean -match '["()\\]') { return 'Unrecognized' }
+        foreach ($match in [regex]::Matches($clean, $pattern)) {
+            if ($match.Groups['result'].Value -notmatch ('(?i)^(?:' + $knownResults + ')$')) { return 'Unrecognized' }
+            [void]$results.Add($match.Groups['result'].Value.ToUpperInvariant())
         }
     }
-    if ($Method -eq 'spf') {
+    if (-not $results.Count -and $Method -eq 'spf') {
         foreach ($value in @(Get-EmlHeader -Headers $Headers -Name 'Received-SPF' -All)) {
-            $match = [System.Text.RegularExpressions.Regex]::Match($value, '(?i)^\s*(?<result>pass|fail|softfail|neutral|none|temperror|permerror)\b')
-            if ($match.Success) {
-                return $match.Groups['result'].Value.ToUpperInvariant()
+            if ($value -match ('(?i)^\s*(?<result>[^\s;]*)(?=\s|;|$)')) {
+                [void]$results.Add($Matches['result'].ToUpperInvariant())
             }
         }
     }
+    if ($results.Count -gt 1) { return 'Conflicting' }
+    if ($results.Count) { return @($results)[0] }
     return 'Not present'
 }
+
 function Get-FirstReceivedEvidence {
     param([object[]]$Headers)
+    $evidence = [pscustomobject]@{ Host = 'Not present'; IP = 'Not present' }
     $receivedValues = @(Get-EmlHeader -Headers $Headers -Name 'Received' -All)
-    if (-not $receivedValues.Count) {
-        return [pscustomobject]@{ Host = 'Not present'; IP = 'Not present' }
-    }
-    $oldestReceived = [string]$receivedValues[$receivedValues.Count - 1]
-    $fromMatch = [System.Text.RegularExpressions.Regex]::Match(
-        $oldestReceived,
+    if (-not $receivedValues.Count) { return $evidence }
+    $fromMatch = [regex]::Match([string]$receivedValues[-1],
         '(?is)(?:^|\s)from\s+(?<segment>.+?)(?=\s+by\s+|\s+via\s+|\s+with\s+|\s*;|$)'
     )
-    if (-not $fromMatch.Success) {
-        return [pscustomobject]@{ Host = 'Not present'; IP = 'Not present' }
-    }
+    if (-not $fromMatch.Success) { return $evidence }
     $segment = $fromMatch.Groups['segment'].Value.Trim()
-    $hostMatch = [System.Text.RegularExpressions.Regex]::Match($segment, '^(?<host>[^\s(;]+)')
-    $hostValue = if ($hostMatch.Success) { $hostMatch.Groups['host'].Value } else { 'Not present' }
-    $ipValue = 'Not present'
-    $ipMatch = [System.Text.RegularExpressions.Regex]::Match(
-        $segment,
+    $hostMatch = [regex]::Match($segment, '^(?<host>[^\s(;]+)')
+    if ($hostMatch.Success) { $evidence.Host = $hostMatch.Groups['host'].Value }
+    $ipMatch = [regex]::Match($segment,
         '(?i)\[(?:IPv6:)?(?<ip>[0-9A-F:.]+)\]|(?<![\d.])(?<ip>(?:\d{1,3}\.){3}\d{1,3})(?![\d.])'
     )
     if ($ipMatch.Success) {
         $parsedIp = $null
         if ([System.Net.IPAddress]::TryParse($ipMatch.Groups['ip'].Value, [ref]$parsedIp)) {
-            $ipValue = $parsedIp.ToString()
+            $evidence.IP = $parsedIp.ToString()
         }
     }
-    return [pscustomobject]@{ Host = $hostValue; IP = $ipValue }
+    return $evidence
 }
 function Get-DisplayHeaderValue {
     param([object[]]$Headers, [string]$Name)
@@ -243,88 +253,79 @@ function Get-DisplayHeaderValue {
 }
 function Test-EmlFile {
     param([string]$Path)
-    if ([string]::IsNullOrWhiteSpace($Path)) {
-        return [pscustomobject]@{ Valid = $false; Message = 'Choose an EML file first.' }
-    }
-    if (-not [System.IO.File]::Exists($Path)) {
-        return [pscustomobject]@{ Valid = $false; Message = 'The selected file no longer exists.' }
-    }
-    if (-not [string]::Equals([System.IO.Path]::GetExtension($Path), '.eml', [System.StringComparison]::OrdinalIgnoreCase)) {
-        return [pscustomobject]@{ Valid = $false; Message = 'Select a file with the .eml extension.' }
-    }
     try {
-        $fileInfo = New-Object System.IO.FileInfo($Path)
-        if ($fileInfo.Length -eq 0) {
-            return [pscustomobject]@{ Valid = $false; Message = 'The selected EML file is empty.' }
+        if ([string]::IsNullOrWhiteSpace($Path)) { throw 'Choose an EML file first.' }
+        if ($Path -match '^[\\/]{2}') { throw 'Copy the EML file to a local drive first.' }
+        if ($env:OS -eq 'Windows_NT') {
+            if ($Path -notmatch '^[A-Za-z]:\\[^:]*$' -or [IO.DriveInfo]::new([IO.Path]::GetPathRoot($Path)).DriveType -eq 'Network') { throw 'Select a local drive.' }
         }
-        if ($fileInfo.Length -gt $script:MaximumEmlBytes) {
-            return [pscustomobject]@{ Valid = $false; Message = 'The selected EML file is larger than 50 MB.' }
+        for ($entry = [IO.FileInfo]::new($Path); $null -ne $entry; $entry = [IO.Directory]::GetParent($entry.FullName)) {
+            if ($entry.Exists -and ($entry.Attributes -band [IO.FileAttributes]::ReparsePoint)) { throw 'Select a file without linked directories.' }
         }
+        if (-not [IO.File]::Exists($Path)) { throw 'The selected file no longer exists.' }
+        if ([IO.Path]::GetExtension($Path) -ine '.eml') { throw 'Select a file with the .eml extension.' }
+        $fileInfo = [IO.FileInfo]::new($Path)
+        if ($fileInfo.Length -eq 0) { throw 'The selected EML file is empty.' }
+        if ($fileInfo.Length -gt $script:MaximumEmlBytes) { throw 'The selected EML file is larger than 50 MB.' }
     }
-    catch {
-        return [pscustomobject]@{ Valid = $false; Message = 'The selected file cannot be inspected.' }
-    }
+    catch { return [pscustomobject]@{ Valid = $false; Message = $_.Exception.Message } }
     return [pscustomobject]@{ Valid = $true; Message = $null }
 }
-function Invoke-PhishFryAnalysis {
-    param([string]$Path)
-    $validation = Test-EmlFile -Path $Path
-    if (-not $validation.Valid) {
-        throw $validation.Message
+
+function New-AnalysisResult {
+    param([object[]]$Headers = @(), [string[]]$Urls = @(), [object[]]$Attachments = @())
+    $overview = [ordered]@{}
+    foreach ($name in 'Subject', 'Date', 'From', 'To', 'Cc') {
+        $overview[$name] = Get-DisplayHeaderValue -Headers $Headers -Name $name
     }
-    try {
-        [byte[]]$fileBytes = [System.IO.File]::ReadAllBytes($Path)
-        $rawText = $script:Latin1Encoding.GetString($fileBytes)
-        $rootEntity = Read-EmlEntity -Text $rawText
-        $headers = @($rootEntity.Headers)
+    $authentication = [ordered]@{}
+    foreach ($method in 'SPF', 'DKIM', 'DMARC') {
+        $authentication[$method] = Get-NormalizedAuthenticationResult -Headers $Headers -Method $method
     }
-    catch {
-        throw 'The selected EML file could not be read or parsed.'
-    }
-    if ($headers.Count -eq 0) {
-        throw 'The EML file does not contain usable message headers.'
-    }
-    $firstSeen = Get-FirstReceivedEvidence -Headers $headers
-    $fromValue = Get-DisplayHeaderValue -Headers $headers -Name 'From'
-    $fromDomain = Get-DomainFromAddressHeader -AddressHeader $fromValue
-    $senderValue = Get-DisplayHeaderValue -Headers $headers -Name 'Sender'
-    $senderDomain = if ($senderValue -eq 'Not present') {
-        $fromDomain
-    }
-    else {
-        Get-DomainFromAddressHeader -AddressHeader $senderValue
-    }
-    $envelopeSender = Get-DisplayHeaderValue -Headers $headers -Name 'Return-Path'
-    $envelopeDomain = Get-DomainFromAddressHeader -AddressHeader $envelopeSender
-    $textParts = New-Object System.Collections.ArrayList
-    $attachments = New-Object System.Collections.ArrayList
-    Read-MimeEntity -Entity $rootEntity -TextParts $textParts -Attachments $attachments
-    $urls = @(Get-ExtractedUrls -TextParts @($textParts))
+    $firstSeen = Get-FirstReceivedEvidence -Headers $Headers
+    $fromDomain = Get-DomainFromAddressHeader -AddressHeader @(Get-EmlHeader -Headers $Headers -Name 'From' -All)
+    $senderValue = @(Get-EmlHeader -Headers $Headers -Name 'Sender' -All)
+    $senderDomain = if (-not $senderValue.Count) { $fromDomain } else { Get-DomainFromAddressHeader -AddressHeader $senderValue }
+    $envelopeSender = Get-DisplayHeaderValue -Headers $Headers -Name 'Return-Path'
     return [pscustomobject]@{
-        Overview = [ordered]@{
-            'Subject' = Get-DisplayHeaderValue -Headers $headers -Name 'Subject'
-            'Date'    = Get-DisplayHeaderValue -Headers $headers -Name 'Date'
-            'From'    = $fromValue
-            'To'      = Get-DisplayHeaderValue -Headers $headers -Name 'To'
-            'Cc'      = Get-DisplayHeaderValue -Headers $headers -Name 'Cc'
-        }
-        Authentication = [ordered]@{
-            'SPF'   = Get-NormalizedAuthenticationResult -Headers $headers -Method 'spf'
-            'DKIM'  = Get-NormalizedAuthenticationResult -Headers $headers -Method 'dkim'
-            'DMARC' = Get-NormalizedAuthenticationResult -Headers $headers -Method 'dmarc'
-        }
+        Overview = $overview
+        Authentication = $authentication
         Metadata = [ordered]@{
             'From Domain'     = $fromDomain
             'Sender Domain'   = $senderDomain
             'Envelope Sender' = $envelopeSender
-            'Envelope Domain' = $envelopeDomain
-            'Reply-To'        = Get-DisplayHeaderValue -Headers $headers -Name 'Reply-To'
+            'Envelope Domain' = Get-DomainFromAddressHeader -AddressHeader @(Get-EmlHeader -Headers $Headers -Name 'Return-Path' -All)
+            'Reply-To'        = Get-DisplayHeaderValue -Headers $Headers -Name 'Reply-To'
             'First Seen IP'   = $firstSeen.IP
             'First Seen Host' = $firstSeen.Host
         }
-        Urls        = $urls
-        Attachments = @($attachments)
+        Urls        = $Urls
+        Attachments = $Attachments
     }
+}
+function Invoke-PhishFryAnalysis {
+    param([string]$Path)
+    $validation = Test-EmlFile -Path $Path
+    if (-not $validation.Valid) { throw $validation.Message }
+    try {
+        $stream = [IO.File]::Open($Path, 'Open', 'Read', 'Read')
+        try {
+            if ($stream.Length -eq 0 -or $stream.Length -gt $script:MaximumEmlBytes) { throw 'Invalid EML size.' }
+            $reader = [IO.BinaryReader]::new($stream)
+            [byte[]]$fileBytes = $reader.ReadBytes([int]$stream.Length)
+            if ($fileBytes.Length -ne $stream.Length) { throw 'Incomplete EML read.' }
+        }
+        finally { $stream.Dispose() }
+        $rawText = $script:Latin1Encoding.GetString($fileBytes)
+        $rootEntity = Read-EmlEntity -Text $rawText
+        $headers = @($rootEntity.Headers)
+    }
+    catch { throw 'The selected EML file could not be read or parsed.' }
+    if (-not $headers.Count) { throw 'The EML file does not contain usable message headers.' }
+    $textParts = New-Object System.Collections.ArrayList
+    $attachments = New-Object System.Collections.ArrayList
+    Read-MimeEntity -Entity $rootEntity -TextParts $textParts -Attachments $attachments
+    New-AnalysisResult -Headers $headers -Urls @(Get-ExtractedUrls -TextParts @($textParts)) -Attachments @($attachments)
 }
 $xaml = @'
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml" xmlns:shell="clr-namespace:System.Windows.Shell;assembly=PresentationFramework" Title="PhishFry - EML Analyzer" Width="1280" Height="912" MinWidth="1000" MinHeight="680" WindowStartupLocation="CenterScreen" WindowStyle="None" ResizeMode="CanResize" Background="#F3F6F4" FontFamily="Segoe UI" Foreground="#172729">
@@ -378,26 +379,17 @@ catch {
     [System.Windows.MessageBox]::Show('PhishFry could not open its interface.', 'PhishFry') | Out-Null
     return
 }
-$FilePathBox = $window.FindName('FilePathBox')
-$ChooseButton = $window.FindName('ChooseButton')
-$AnalyzeButton = $window.FindName('AnalyzeButton')
-$ClearButton = $window.FindName('ClearButton')
-$MinimizeButton = $window.FindName('MinimizeButton')
-$MaximizeButton = $window.FindName('MaximizeButton')
-$MaximizeGlyph = $window.FindName('MaximizeGlyph')
-$RestoreGlyph = $window.FindName('RestoreGlyph')
-$CloseButton = $window.FindName('CloseButton')
-$OverviewList = $window.FindName('OverviewList')
-$MetadataList = $window.FindName('MetadataList')
-$UrlList = $window.FindName('UrlList')
-$AttachmentGrid = $window.FindName('AttachmentGrid')
-$UrlEmpty = $window.FindName('UrlEmpty')
-$AttachmentEmpty = $window.FindName('AttachmentEmpty')
-$SpfStatus = $window.FindName('SpfStatus')
-$DkimStatus = $window.FindName('DkimStatus')
-$DmarcStatus = $window.FindName('DmarcStatus')
-$MinimizeButton.Add_Click({ $window.WindowState = [System.Windows.WindowState]::Minimized })
-$MaximizeButton.Add_Click({
+$ui = @{}
+$controlNames = @(
+    'FilePathBox', 'ChooseButton', 'AnalyzeButton', 'ClearButton', 'MinimizeButton', 'MaximizeButton',
+    'MaximizeGlyph', 'RestoreGlyph', 'CloseButton', 'OverviewList', 'MetadataList', 'UrlList',
+    'AttachmentGrid', 'UrlEmpty', 'AttachmentEmpty', 'SpfStatus', 'DkimStatus', 'DmarcStatus'
+)
+foreach ($name in $controlNames) {
+    $ui[$name] = $window.FindName($name)
+}
+$ui.MinimizeButton.Add_Click({ $window.WindowState = [System.Windows.WindowState]::Minimized })
+$ui.MaximizeButton.Add_Click({
     if ($window.WindowState -eq [System.Windows.WindowState]::Maximized) {
         $window.WindowState = [System.Windows.WindowState]::Normal
     }
@@ -407,10 +399,10 @@ $MaximizeButton.Add_Click({
 })
 $window.Add_StateChanged({
     $isMaximized = $window.WindowState -eq [System.Windows.WindowState]::Maximized
-    $MaximizeGlyph.Visibility = if ($isMaximized) { 'Collapsed' } else { 'Visible' }
-    $RestoreGlyph.Visibility = if ($isMaximized) { 'Visible' } else { 'Collapsed' }
+    $ui.MaximizeGlyph.Visibility = if ($isMaximized) { 'Collapsed' } else { 'Visible' }
+    $ui.RestoreGlyph.Visibility = if ($isMaximized) { 'Visible' } else { 'Collapsed' }
 })
-$CloseButton.Add_Click({ $window.Close() })
+$ui.CloseButton.Add_Click({ $window.Close() })
 function Show-Error {
     param([string]$Message)
     [System.Windows.MessageBox]::Show($window, $Message, 'PhishFry', 'OK', 'Error') | Out-Null
@@ -435,17 +427,15 @@ function ConvertTo-ValueRows {
         [bool]$AllowCopy,
         [bool]$HideMissing = $false
     )
-    $rows = New-Object System.Collections.ArrayList
     foreach ($entry in $Values.GetEnumerator()) {
         $value = [string]$entry.Value
         if ($HideMissing -and $value -eq 'Not present') { continue }
-        [void]$rows.Add([pscustomobject]@{
+        [pscustomobject]@{
             Label   = [string]$entry.Key
             Value   = $value
             CanCopy = $AllowCopy -and $value -notin @('Not present', 'Decode failed', 'Hash failed')
-        })
+        }
     }
-    return @($rows)
 }
 function Copy-Value {
     param([string]$Value)
@@ -459,39 +449,21 @@ function Copy-Value {
         Show-Error -Message 'The value could not be copied.'
     }
 }
-function Clear-Results {
-    $emptyOverview = [ordered]@{
-        Subject = 'Not present'; Date = 'Not present'; From = 'Not present'
-        To = 'Not present'; Cc = 'Not present'
-    }
-    $emptyMetadata = [ordered]@{
-        'From Domain' = 'Not present'; 'Sender Domain' = 'Not present'
-        'Envelope Sender' = 'Not present'; 'Envelope Domain' = 'Not present'
-        'Reply-To' = 'Not present'; 'First Seen IP' = 'Not present'
-        'First Seen Host' = 'Not present'
-    }
-    $OverviewList.ItemsSource = @(ConvertTo-ValueRows -Values $emptyOverview -AllowCopy $false)
-    $MetadataList.ItemsSource = @(ConvertTo-ValueRows -Values $emptyMetadata -AllowCopy $true)
-    $UrlList.ItemsSource = $null
-    $AttachmentGrid.ItemsSource = $null
-    $UrlEmpty.Visibility = [System.Windows.Visibility]::Visible
-    $AttachmentEmpty.Visibility = [System.Windows.Visibility]::Visible
-    Set-AuthStatus -Control $SpfStatus -Value 'Not present'
-    Set-AuthStatus -Control $DkimStatus -Value 'Not present'
-    Set-AuthStatus -Control $DmarcStatus -Value 'Not present'
-}
 function Show-Analysis {
     param([object]$Analysis)
-    $OverviewList.ItemsSource = @(ConvertTo-ValueRows -Values $Analysis.Overview -AllowCopy $false -HideMissing $true)
-    $MetadataList.ItemsSource = @(ConvertTo-ValueRows -Values $Analysis.Metadata -AllowCopy $true -HideMissing $true)
-    Set-AuthStatus -Control $SpfStatus -Value $Analysis.Authentication['SPF']
-    Set-AuthStatus -Control $DkimStatus -Value $Analysis.Authentication['DKIM']
-    Set-AuthStatus -Control $DmarcStatus -Value $Analysis.Authentication['DMARC']
+    $hideMissing = $null -ne $Analysis
+    if (-not $hideMissing) { $Analysis = New-AnalysisResult }
+    foreach ($section in 'Overview', 'Metadata') {
+        $ui[$section + 'List'].ItemsSource = @(ConvertTo-ValueRows -Values $Analysis.$section -AllowCopy ($section -eq 'Metadata') -HideMissing $hideMissing)
+    }
+    foreach ($method in 'SPF', 'DKIM', 'DMARC') {
+        Set-AuthStatus -Control $ui[$method + 'Status'] -Value $Analysis.Authentication[$method]
+    }
     $urlRows = @($Analysis.Urls | ForEach-Object { [pscustomobject]@{ Value = [string]$_ } })
-    $UrlList.ItemsSource = $urlRows
-    $UrlEmpty.Visibility = if ($urlRows.Count) { 'Collapsed' } else { 'Visible' }
-    $AttachmentGrid.ItemsSource = @($Analysis.Attachments)
-    $AttachmentEmpty.Visibility = if ($Analysis.Attachments.Count) { 'Collapsed' } else { 'Visible' }
+    $ui.UrlList.ItemsSource = $urlRows
+    $ui.UrlEmpty.Visibility = if ($urlRows.Count) { 'Collapsed' } else { 'Visible' }
+    $ui.AttachmentGrid.ItemsSource = @($Analysis.Attachments)
+    $ui.AttachmentEmpty.Visibility = if ($Analysis.Attachments.Count) { 'Collapsed' } else { 'Visible' }
 }
 $copyHandler = [System.Windows.RoutedEventHandler]{
     param($eventSource, $routedEventArgs)
@@ -503,7 +475,7 @@ $copyHandler = [System.Windows.RoutedEventHandler]{
     }
 }
 $window.AddHandler([System.Windows.Controls.Button]::ClickEvent, $copyHandler)
-$ChooseButton.Add_Click({
+$ui.ChooseButton.Add_Click({
     $dialog = New-Object Microsoft.Win32.OpenFileDialog
     $dialog.Title = 'Choose an EML file'
     $dialog.Filter = 'Email message (*.eml)|*.eml'
@@ -521,42 +493,42 @@ $ChooseButton.Add_Click({
         return
     }
     $script:SelectedEmlPath = $dialog.FileName
-    $FilePathBox.Text = $dialog.FileName
-    $AnalyzeButton.IsEnabled = $true
-    Clear-Results
+    $ui.FilePathBox.Text = $dialog.FileName
+    $ui.AnalyzeButton.IsEnabled = $true
+    Show-Analysis
 })
-$AnalyzeButton.Add_Click({
+$ui.AnalyzeButton.Add_Click({
     $validation = Test-EmlFile -Path $script:SelectedEmlPath
     if (-not $validation.Valid) {
-        $AnalyzeButton.IsEnabled = $false
+        $ui.AnalyzeButton.IsEnabled = $false
         Show-Error -Message $validation.Message
         return
     }
-    $AnalyzeButton.IsEnabled = $false
-    $ChooseButton.IsEnabled = $false
-    $ClearButton.IsEnabled = $false
+    $ui.AnalyzeButton.IsEnabled = $false
+    $ui.ChooseButton.IsEnabled = $false
+    $ui.ClearButton.IsEnabled = $false
     [System.Windows.Input.Mouse]::OverrideCursor = [System.Windows.Input.Cursors]::Wait
-    Clear-Results
+    Show-Analysis
     try {
         $analysis = Invoke-PhishFryAnalysis -Path $script:SelectedEmlPath
         Show-Analysis -Analysis $analysis
     }
     catch {
-        Clear-Results
-        Show-Error -Message 'The EML file could not be analyzed.'
+        Show-Analysis
+        Show-Error -Message $_.Exception.Message
     }
     finally {
         [System.Windows.Input.Mouse]::OverrideCursor = $null
-        $ChooseButton.IsEnabled = $true
-        $ClearButton.IsEnabled = $true
-        $AnalyzeButton.IsEnabled = (Test-EmlFile -Path $script:SelectedEmlPath).Valid
+        $ui.ChooseButton.IsEnabled = $true
+        $ui.ClearButton.IsEnabled = $true
+        $ui.AnalyzeButton.IsEnabled = (Test-EmlFile -Path $script:SelectedEmlPath).Valid
     }
 })
-$ClearButton.Add_Click({
+$ui.ClearButton.Add_Click({
     $script:SelectedEmlPath = $null
-    $FilePathBox.Text = ''
-    $AnalyzeButton.IsEnabled = $false
-    Clear-Results
+    $ui.FilePathBox.Text = ''
+    $ui.AnalyzeButton.IsEnabled = $false
+    Show-Analysis
 })
-Clear-Results
+Show-Analysis
 [void]$window.ShowDialog()
