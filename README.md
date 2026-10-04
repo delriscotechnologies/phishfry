@@ -16,12 +16,12 @@ The parser runs locally and does not contact external analysis services, open UR
 
 ## Install
 
-You need Windows and PowerShell 5.1 or newer. No additional modules are required.
+Use Windows PowerShell 5.1. No additional modules are required.
 
 ```powershell
 git clone https://github.com/delriscotechnologies/phishfry.git
 cd phishfry
-powershell.exe -File .\PhishFry.ps1
+.\PhishFry.ps1
 ```
 
 Choose an .eml file, select **Analyze**, and review the results. Files larger than 50 MB are rejected.
