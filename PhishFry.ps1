@@ -140,7 +140,7 @@ function Get-NormalizedAuthenticationResult {
     $results = [System.Collections.Generic.HashSet[string]]::new()
     $ignored = '\((?>[^()\\]+|\\.|(?<Depth>\()|(?<-Depth>\)))*(?(Depth)(?!))\)|"(?:\\.|[^"\\])*"'
     $pattern = '(?i);\s*' + $Method + '(?:/\d+)?\s*=\s*(?<result>[^\s;]*)(?=\s|;|$)'
-    $validResult = '(?i)^(?:pass|fail|softfail|neutral|none|temperror|permerror)$'
+    $validResult = '(?i)^(?:pass|fail|none|temperror|permerror' + $(if ($Method -eq 'spf') { '|softfail|neutral' } elseif ($Method -eq 'dkim') { '|policy|neutral' }) + ')$'
     foreach ($value in @(Get-EmlHeader -Headers $Headers -Name 'Authentication-Results' -All)) {
         $clean = [regex]::Replace($value, $ignored, ' ', 'None', [TimeSpan]::FromSeconds(2))
         if ($clean -match '["()\\]') { return 'Unrecognized' }
