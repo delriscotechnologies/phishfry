@@ -140,16 +140,17 @@ function Get-NormalizedAuthenticationResult {
     $results = [System.Collections.Generic.HashSet[string]]::new()
     $ignored = '\((?>[^()\\]+|\\.|(?<Depth>\()|(?<-Depth>\)))*(?(Depth)(?!))\)|"(?:\\.|[^"\\])*"'
     $pattern = '(?i);\s*' + $Method + '(?:/\d+)?\s*=\s*(?<result>[^\s;]*)(?=\s|;|$)'
+    $validResult = '(?i)^(?:pass|fail|softfail|neutral|none|temperror|permerror)$'
     foreach ($value in @(Get-EmlHeader -Headers $Headers -Name 'Authentication-Results' -All)) {
         $clean = [regex]::Replace($value, $ignored, ' ', 'None', [TimeSpan]::FromSeconds(2))
         if ($clean -match '["()\\]') { return 'Unrecognized' }
         foreach ($match in [regex]::Matches($clean, $pattern)) {
-            if ($match.Groups['result'].Value -notmatch '(?i)^(?:pass|fail|softfail|neutral|none|temperror|permerror)$') { return 'Unrecognized' }
+            if ($match.Groups['result'].Value -notmatch $validResult) { return 'Unrecognized' }
             [void]$results.Add($match.Groups['result'].Value.ToUpperInvariant())
         }
     }
     if (-not $results.Count -and $Method -eq 'spf') {
-        foreach ($value in @(Get-EmlHeader -Headers $Headers -Name 'Received-SPF' -All)) { if ($value -match ('(?i)^\s*(?<result>[^\s;]*)(?=\s|;|$)')) { [void]$results.Add($Matches['result'].ToUpperInvariant()) } }
+        foreach ($value in @(Get-EmlHeader -Headers $Headers -Name 'Received-SPF' -All)) { if ($value -match ('(?i)^\s*(?<result>[^\s;]*)(?=\s|;|$)')) { $result = $Matches['result']; if ($result -notmatch $validResult) { return 'Unrecognized' }; [void]$results.Add($result.ToUpperInvariant()) } }
     }
     if ($results.Count -gt 1) { return 'Conflicting' }
     if ($results.Count) { return @($results)[0] }
